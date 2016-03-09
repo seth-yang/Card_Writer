@@ -11,7 +11,7 @@ Card card (&rfid);
 Command cmd;
 
 void setup () {
-    Serial.begin(9600);
+    Serial.begin(115200);
     pinMode (13, OUTPUT);
     pinMode (BEEPER, OUTPUT);
     digitalWrite (BEEPER, LOW);
