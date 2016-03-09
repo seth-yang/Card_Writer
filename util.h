@@ -18,5 +18,4 @@ inline void error (int beeper) {
         beep (beeper);
     }
 }
-
 #endif //_UTIL_H_

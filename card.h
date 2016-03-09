@@ -31,14 +31,17 @@ class Card {
     private :
         RFID *rfid;
         struct _position mark, app;
+        bool ready = false;
 
         int read_sector (struct _position *pos, unsigned char *key, unsigned char *buff);
         int write_sector (struct _position *pos, unsigned char *key, unsigned char *data);
-    public :
-        Card (RFID *rfid);
-        int readCard (unsigned char *buff);
         int writeMark (uint16_t index, uint32_t timestamp, uint8_t mainVersion, uint8_t minVersion);
         int writeData (uint8_t isAdmin, uint32_t expire, uint32_t userId);
+        void prepare ();
+    public :
+        Card (RFID *rfid);
+        int read (unsigned char *buff);
+        int write (struct CNG_DATA *data);
         
         unsigned char DEFAULT_KEY[16] = {
             0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
@@ -61,11 +64,7 @@ Card::Card (RFID *rfid) {
     app.block   = mark.block = DATA_BLOCK_INDEX;
 }
 
-/**
- * read block data at position:pos, with the key.
- * if read success, write the data to buff.
- */
-int Card::read_sector (struct _position *pos, unsigned char *key, unsigned char *buff) {
+void Card::prepare () {
     rfid -> init ();
     rfid -> isCard ();
     unsigned char SN[5];
@@ -74,7 +73,18 @@ int Card::read_sector (struct _position *pos, unsigned char *key, unsigned char 
         memcpy (SN, rfid->serNum, 5);
     }
     rfid -> selectTag (SN);
-    int state = rfid->auth (PICC_AUTHENT1A, pos -> password_offset (), key, SN);
+
+    ready = true;
+}
+
+/**
+ * read block data at position:pos, with the key.
+ * if read success, write the data to buff.
+ */
+int Card::read_sector (struct _position *pos, unsigned char *key, unsigned char *buff) {
+    if (! ready )
+        prepare ();
+    int state = rfid->auth (PICC_AUTHENT1A, pos -> password_offset (), key, rfid -> serNum);
     if (state == MI_OK) {
         return rfid -> read (pos -> data_offset (), buff);
     }
@@ -84,15 +94,10 @@ int Card::read_sector (struct _position *pos, unsigned char *key, unsigned char 
  * write the data to block as pos with key
  */
 int Card::write_sector (struct _position *pos, unsigned char *key, unsigned char *data) {
-    rfid -> init ();
-    rfid -> isCard ();
-    unsigned char SN[5];
-    memset (SN, 0, 5);
-    if (rfid -> readCardSerial ()) {
-        memcpy (SN, rfid->serNum, 5);
-    }
-    rfid -> selectTag (SN);
-    int state = rfid->auth (PICC_AUTHENT1A, pos -> password_offset (), key, SN);
+    if (! ready )
+        prepare ();
+        
+    int state = rfid->auth (PICC_AUTHENT1A, pos -> password_offset (), key, rfid -> serNum);
     if (state == MI_OK) {
         return rfid -> write (pos -> data_offset (), data);
     }
@@ -101,13 +106,18 @@ int Card::write_sector (struct _position *pos, unsigned char *key, unsigned char
 /**
  * read the card info
  */
-int Card::readCard (unsigned char *buff) {
+int Card::read (unsigned char *buff) {
     int state = read_sector (&mark, DEFAULT_KEY, buff);
-    if (state != MI_OK) {
-        return state;
+    if (state == MI_OK) {
+        if (buff [0] != 0xca) { // blank card.
+            memset (buff, 0, 32);
+        } else {
+            state = read_sector (&app, APP_KEY, buff + 16);
+        }
     }
-    
-    return read_sector (&app, DEFAULT_KEY, buff + 16);
+
+    ready = false;
+    return state;
 }
 
 /**
@@ -153,6 +163,33 @@ int Card::writeData (uint8_t isAdmin, uint32_t expire, uint32_t userId) {
     buff [ 9] = (userId >>  8) & 0xff;
     buff [10] = userId         & 0xff;
 
-    return write_sector (&app, DEFAULT_KEY, buff);
+    return write_sector (&app, APP_KEY, buff);
+}
+
+int Card::write (struct CNG_DATA *data) {
+    unsigned char buff[16];
+    memset (buff, 0, 16);
+    int state = read_sector (&mark, DEFAULT_KEY, buff);
+    if (state == MI_OK) {
+        if (buff[0] != 0xca) {
+            // blank card, we'll write mark and set the app password
+            // step 1: write the mark
+            state = writeMark (data -> id, data -> timestamp, data -> main_version, data -> min_version);
+            if (state == MI_OK) {
+                // step 2: set the app password
+                // check the password
+                int block = app.password_offset ();
+                state = rfid->auth (PICC_AUTHENT1A, block, DEFAULT_KEY, rfid -> serNum);
+                if (state == MI_OK) {
+                    state = rfid->write (block, APP_KEY);
+                }
+            }
+        }
+
+        // step 3: write the app data
+        state = writeData (data -> isAdmin, data ->expire, data -> cardNo);
+    }
+    ready = false;
+    return state;
 }
 #endif // CARD_H
